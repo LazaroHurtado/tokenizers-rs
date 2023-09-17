@@ -1,15 +1,20 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::io::{Error, ErrorKind};
 
-pub struct BytePairEncoding {}
+pub struct BytePairEncoding {
+    pub vocab_size: usize,
+    pub tokenizer: HashMap<String, Vec<String>>,
+}
 
 impl BytePairEncoding {
     const PUNCTUATION: [char; 6] = [' ', '.', ',', '!', '?', '\n'];
     const START_TOKEN: &str = "<|startoftext|>";
     const END_TOKEN: &str = "<|endoftext|>";
 
-    pub fn tokenize(corpus: String, max_vocab_size: usize) -> Vec<String> {
+    pub fn from(corpus: String, max_vocab_size: usize) -> Self {
         let vocabulary = Self::build_vocablary(&corpus);
-        let mut vocab_size = vocabulary.len();
+        let mut vocab_size = vocabulary.len() - 2;
 
         assert!(
             max_vocab_size > vocab_size,
@@ -18,12 +23,14 @@ impl BytePairEncoding {
             vocab_size
         );
         if max_vocab_size == vocab_size {
-            return vocabulary;
+            return BytePairEncoding {
+                vocab_size: max_vocab_size,
+                tokenizer: HashMap::new(),
+            };
         }
 
         let pre_tokenized = Self::pre_tokenize(&corpus);
         let mut words = Self::text_to_map(&pre_tokenized);
-        let mut merges = HashSet::<String>::new();
 
         while max_vocab_size > vocab_size {
             let (pair, freq) = Self::get_most_frequent_pair(&words);
@@ -31,14 +38,11 @@ impl BytePairEncoding {
                 break;
             }
 
-            merges.insert(pair.join(""));
-
             words = Self::merge_by_pair(words, pair);
             vocab_size += 1;
         }
 
-        let mut tokenized: Vec<Vec<String>> = Vec::with_capacity(pre_tokenized.len());
-        let original_to_tokenized_mapping =
+        let tokenizer_mapper =
             words
                 .into_keys()
                 .fold(HashMap::<String, Vec<String>>::new(), |mut map, word| {
@@ -46,13 +50,26 @@ impl BytePairEncoding {
                     map
                 });
 
-        tokenized.push(vec![Self::START_TOKEN.to_string()]);
-        for word in pre_tokenized.into_iter() {
-            tokenized.push(original_to_tokenized_mapping.get(&word).unwrap().clone());
+        BytePairEncoding {
+            vocab_size,
+            tokenizer: tokenizer_mapper,
         }
-        tokenized.push(vec![Self::END_TOKEN.to_string()]);
+    }
 
-        tokenized.into_iter().flatten().collect::<Vec<String>>()
+    pub fn tokenize(&self, text: String) -> Result<Vec<String>, Error> {
+        let mut tokenized = vec![Self::START_TOKEN.to_string()];
+
+        let pre_tokenized = Self::pre_tokenize(&text);
+        for word in pre_tokenized.into_iter() {
+            let tokenized_word = self.tokenizer.get(&word).ok_or(Error::new(
+                ErrorKind::InvalidInput,
+                "Word not found in vocabulary",
+            ))?;
+            tokenized.extend(tokenized_word.clone());
+        }
+
+        tokenized.push(Self::END_TOKEN.to_string());
+        Ok(tokenized)
     }
 
     fn build_vocablary(corpus: &str) -> Vec<String> {
@@ -108,11 +125,11 @@ impl BytePairEncoding {
                 *entry += freq;
 
                 match (*entry).cmp(&highest_freq) {
-                    std::cmp::Ordering::Greater => {
+                    Ordering::Greater => {
                         highest_freq = *entry;
                         most_freq_pair = pair;
                     }
-                    std::cmp::Ordering::Equal => {
+                    Ordering::Equal => {
                         most_freq_pair = most_freq_pair.max(pair);
                     }
                     _ => {}
@@ -127,7 +144,7 @@ impl BytePairEncoding {
         words: HashMap<Vec<String>, usize>,
         pair: Vec<String>,
     ) -> HashMap<Vec<String>, usize> {
-        let mut new_words = HashMap::<Vec<String>, usize>::new();
+        let mut new_words = HashMap::<Vec<String>, usize>::with_capacity(words.len());
         let pair_str = pair.join("");
 
         for (word, freq) in words.into_iter() {
@@ -138,9 +155,8 @@ impl BytePairEncoding {
                 if new_word[i] == pair[0] && new_word[i + 1] == pair[1] {
                     new_word[i] = pair_str.clone();
                     new_word.remove(i + 1);
-                } else {
-                    i += 1;
                 }
+                i += 1;
             }
 
             *new_words.entry(new_word).or_insert(0) += freq;
